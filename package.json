@@ -1,0 +1,16 @@
+{
+  "name": "notion-subtree-md-export",
+  "version": "1.0.0",
+  "description": "지정한 Notion 페이지와 그 하위 전체를 계층 구조 그대로 Markdown으로 백업 (의존성 없음)",
+  "type": "module",
+  "bin": {
+    "notion-export": "notion-export.mjs"
+  },
+  "scripts": {
+    "export": "node notion-export.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

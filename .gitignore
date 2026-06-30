@@ -1,0 +1,11 @@
+# 비밀 토큰 — 절대 커밋 금지
+.env
+.env.*
+!.env.example
+
+# 백업 결과물(개인 데이터)은 전부 output/ 아래에 모음 → 통째로 제외
+output/
+
+# 의존성 / OS
+node_modules/
+.DS_Store
