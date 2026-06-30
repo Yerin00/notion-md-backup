@@ -34,3 +34,12 @@ node notion-export.mjs "<페이지 URL>"
 ```bash
 node notion-export.mjs "https://www.notion.so/My-Page-1a2b3c4d5e6f7890abcdef1234567890"
 ```
+
+## 동작 / 참고
+
+- **출력 구조**: 페이지마다 자기 폴더(`<페이지>/<페이지>.md` + `assets/` + 하위 폴더). 사람이 읽기 좋고 Obsidian/VS Code에서 그대로 열림.
+- **이미지**: 각 페이지 `assets/`에 다운로드(Notion 업로드 파일은 URL이 만료되므로). 외부 이미지도 받고, 유튜브 등 외부 영상은 링크 유지.
+- **링크된 Notion 페이지(1단계)**: 본문이 다른 Notion 페이지를 링크/멘션하면, 그 페이지를 **1단계만** 자동으로 가져옴 — 이미 받은 하위 트리 안이면 로컬 파일로 연결, 밖이면 `_linked/`로 받아 연결. 권한 없는 링크는 URL 그대로 유지. (그 페이지의 또 다른 링크까지는 따라가지 않음 → 순환 없음). 끄려면 `FETCH_LINKED=0`.
+- **데이터베이스**: 뷰의 필터·정렬은 무시되고 전체 row가 받아짐. 각 row는 페이지로, `<DB>.md`에 표로도 요약.
+- **생성자 기준 정리**: `node cleanup-by-creator.mjs "<폴더>" --keep "이름"` (미리보기) → 확인 후 `--apply`. DB row의 `생성자` frontmatter 기준으로 폴더째 삭제.
+- **Obsidian 임베드**(`![[..]]`) 형식: `LINK_STYLE=wiki` 환경변수.

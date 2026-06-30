@@ -12,8 +12,8 @@
 //     "<title>.md" file PLUS a "<title>/" folder holding its descendants
 //     (same layout Notion's own Markdown export uses).
 
-import { readFileSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
-import { join, dirname, relative, sep } from "node:path";
+import { readFileSync, mkdirSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { join, dirname, relative, sep, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -359,16 +359,25 @@ async function blocksToMarkdown(blocks, indent, childTargets) {
         break;
       case "child_page": {
         const title = data.title || "Untitled";
-        const sub = uniqueName(childTargets.dir, sanitize(title), block.id);
-        childTargets.pages.push({ id: block.id, title, name: sub });
-        lines.push(`${pad}- 📄 [${title}](<./${sub}/${sub}.md>)`);
+        if (childTargets.linkedMode) {
+          // 1-level linked page: don't recurse, just point at the page online
+          lines.push(`${pad}- 📄 [${title}](https://www.notion.so/${block.id.replace(/-/g, "")})`);
+        } else {
+          const sub = uniqueName(childTargets.dir, sanitize(title), block.id);
+          childTargets.pages.push({ id: block.id, title, name: sub });
+          lines.push(`${pad}- 📄 [${title}](<./${sub}/${sub}.md>)`);
+        }
         break;
       }
       case "child_database": {
         const title = data.title || "Untitled Database";
-        const sub = uniqueName(childTargets.dir, sanitize(title), block.id);
-        childTargets.databases.push({ id: block.id, name: sub, title });
-        lines.push(`${pad}- 🗂️ [${title}](<./${sub}/${sub}.md>)`);
+        if (childTargets.linkedMode) {
+          lines.push(`${pad}- 🗂️ [${title}](https://www.notion.so/${block.id.replace(/-/g, "")})`);
+        } else {
+          const sub = uniqueName(childTargets.dir, sanitize(title), block.id);
+          childTargets.databases.push({ id: block.id, name: sub, title });
+          lines.push(`${pad}- 🗂️ [${title}](<./${sub}/${sub}.md>)`);
+        }
         break;
       }
       case "synced_block":
@@ -465,6 +474,7 @@ function propsToFrontmatter(page) {
 //   ├─ assets/        ← this page's images
 //   └─ <child>/ ...   ← each child page as its own folder
 let exportedCount = 0;
+const exportedIdToPath = new Map(); // compact page id -> absolute .md path (for link rewiring)
 async function exportPage({ id, title, dir, name }) {
   exportedCount++;
   const page = await safe(() => notion(`/pages/${id}`));
@@ -493,8 +503,10 @@ async function exportPage({ id, title, dir, name }) {
   const md = `${front}# ${realTitle}\n\n${body}\n`;
 
   mkdirSync(pageDir, { recursive: true });
-  writeFileSync(join(pageDir, `${clean}.md`), md, "utf8");
-  console.log(`  ✅ ${join(pageDir, `${clean}.md`).replace(outRoot, ".")}`);
+  const absMd = join(pageDir, `${clean}.md`);
+  writeFileSync(absMd, md, "utf8");
+  exportedIdToPath.set(id.replace(/-/g, "").toLowerCase(), absMd); // for link rewiring
+  console.log(`  ✅ ${absMd.replace(outRoot, ".")}`);
 
   // recurse: children become subfolders inside this page's folder
   for (const cp of childTargets.pages) {
@@ -591,9 +603,114 @@ async function main() {
     await exportDatabase({ id, name: uniqueName(outRoot, sanitize(title), id), title, dir: outRoot });
   }
 
+  // 1단계 링크 페이지 가져오기 (기본 켜짐, FETCH_LINKED=0 으로 끔)
+  if (process.env.FETCH_LINKED !== "0") {
+    await fetchLinkedPages();
+  }
+
   console.log(
     `\n✨ 완료: 페이지 ${exportedCount}개, 에셋 ${assetCount}개 다운로드, API 호출 ${reqCount}회. → ${outRoot}`
   );
+}
+
+// ---------- 본문 속 Notion 링크를 1단계만 가져와 로컬로 연결 ----------
+// 이미 하위 트리에 있는 페이지면 그 로컬 파일로, 아니면 _linked/ 로 받아 연결.
+// 1단계만 받으므로 재귀가 없어 순환 위험 없음. 같은 페이지는 Set 으로 1번만 조회.
+function compactId(s) {
+  const m = s.replace(/-/g, "").match(/[0-9a-fA-F]{32}/);
+  return m ? m[0].toLowerCase() : null;
+}
+function allMdFiles(dir, skipDir) {
+  const out = [];
+  (function walk(d) {
+    let entries;
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) { if (e.name !== "assets" && e.name !== skipDir) walk(p); }
+      else if (e.name.endsWith(".md")) out.push(p);
+    }
+  })(dir);
+  return out;
+}
+const NOTION_LINK_RE =
+  /\[([^\]]*)\]\(<?(https?:\/\/(?:app\.notion\.com|(?:www\.)?notion\.(?:so|site))\/[^\s)>\]]*)>?\)/g;
+
+async function exportLinkedPage(id, linkedRoot) {
+  let page;
+  try {
+    page = await notion(`/pages/${id}`);
+  } catch {
+    return null; // 권한 없음/삭제됨 → 호출측에서 URL 유지
+  }
+  const title = pageTitle(page);
+  const clean = uniqueName(linkedRoot, sanitize(title), id);
+  const pageDir = join(linkedRoot, clean);
+  const childTargets = {
+    pages: [], databases: [],
+    dir: pageDir, assetsDir: join(pageDir, "assets"), assetsRel: "assets",
+    linkedMode: true, // 하위 페이지/DB 는 따라가지 않음
+  };
+  let body = "";
+  try {
+    body = await blocksToMarkdown(await getAllChildren(id), 0, childTargets);
+  } catch (e) {
+    body = `\n> ⚠️ 본문 변환 오류: ${e.message}\n`;
+  }
+  const front = page.parent?.type === "database_id" ? propsToFrontmatter(page) : "";
+  mkdirSync(pageDir, { recursive: true });
+  const absMd = join(pageDir, `${clean}.md`);
+  writeFileSync(absMd, `${front}# ${title}\n\n> 🔗 다른 페이지에서 링크되어 1단계만 가져온 페이지\n\n${body}\n`, "utf8");
+  return absMd;
+}
+
+async function fetchLinkedPages() {
+  const LINKED = "_linked";
+  const linkedRoot = join(outRoot, LINKED);
+  const files = allMdFiles(outRoot, LINKED);
+
+  // 본문에서 Notion 링크 id 수집 (이미 export된 내부 페이지는 제외 → 그건 바로 로컬 연결)
+  const refs = new Map(); // compact id -> sample title
+  for (const f of files) {
+    const text = readFileSync(f, "utf8");
+    let m;
+    while ((m = NOTION_LINK_RE.exec(text))) {
+      const cid = compactId(m[2]);
+      if (cid && !refs.has(cid)) refs.set(cid, m[1].trim());
+    }
+  }
+  // 가져와야 할 것 = 하위 트리에 없는 외부 링크
+  const external = [...refs.keys()].filter((cid) => !exportedIdToPath.has(cid));
+  if (!refs.size) return;
+
+  console.log(`\n🔗 링크된 Notion 페이지 1단계 가져오기: 외부 ${external.length}개 (+ 내부 연결 ${refs.size - external.length}개)`);
+  const idToLinked = new Map();
+  for (const cid of external) {
+    const abs = await exportLinkedPage(cid, linkedRoot);
+    if (abs) { idToLinked.set(cid, abs); console.log(`  ✅ _linked/${basename(dirname(abs))}`); }
+    else console.warn(`  ⚠️ 못 가져옴(권한/삭제) → URL 유지: ${refs.get(cid) || cid}`);
+  }
+
+  // 링크 교체: 내부 페이지는 export 경로로, 외부는 _linked 경로로
+  let rewired = 0;
+  for (const f of files) {
+    const dir = dirname(f);
+    let text = readFileSync(f, "utf8");
+    let changed = false;
+    text = text.replace(
+      /(\]\()(<?)(https?:\/\/(?:app\.notion\.com|(?:www\.)?notion\.(?:so|site))\/[^\s)>\]]*)(>?)(\))/g,
+      (whole, open, lt, url, gt, close) => {
+        const cid = compactId(url);
+        const target = cid && (exportedIdToPath.get(cid) || idToLinked.get(cid));
+        if (!target) return whole;
+        const rel = relative(dir, target).split(sep).join("/");
+        changed = true; rewired++;
+        return `${open}<${rel}>${close}`;
+      }
+    );
+    if (changed) writeFileSync(f, text, "utf8");
+  }
+  console.log(`  → 링크 ${rewired}개를 로컬 파일로 연결`);
 }
 
 main().catch((e) => {
